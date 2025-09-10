@@ -1,0 +1,5 @@
+python-telegram-bot==20.7
+aiohttp==3.9.5
+requests==2.32.2
+ffmpeg-python==0.2.0
+python-dotenv==1.0.1
