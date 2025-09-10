@@ -1,22 +1,17 @@
-# Use lightweight Python image
 FROM python:3.11-slim
 
-# Set work directory
 WORKDIR /app
 
-# Install ffmpeg
-RUN apt-get update && \
-    apt-get install -y ffmpeg && \
-    rm -rf /var/lib/apt/lists/*
-
-# Copy files
+# Install dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY . .
+# Copy bot code
+COPY src/ src/
 
-# Make start.sh executable
+# Copy start script
+COPY start.sh .
 RUN chmod +x start.sh
 
-# Start the bot
+# Start bot
 CMD ["./start.sh"]
