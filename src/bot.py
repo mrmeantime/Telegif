@@ -1,26 +1,46 @@
 import os
+import sys
 import logging
 import tempfile
-import requests
 import subprocess
+import requests
+
 from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, ContextTypes, filters
 
+# -------------------
+# Logging
+# -------------------
 logging.basicConfig(
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    level=logging.INFO
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s"
 )
 
+# -------------------
+# Config
+# -------------------
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CATBOX_URL = "https://catbox.moe/user/api.php"
-MAX_FILE_SIZE = 8 * 1024 * 1024  # 8MB for final output only
+MAX_FILE_SIZE = 8 * 1024 * 1024  # 8MB
 
-# --- Convert to GIF with size control ---
+# -------------------
+# Token check
+# -------------------
+if not TELEGRAM_TOKEN:
+    logging.error("❌ TELEGRAM_TOKEN is missing! Set it in Render → Settings → Environment.")
+    sys.exit(1)
+
+if ":" not in TELEGRAM_TOKEN or len(TELEGRAM_TOKEN.split(":")) != 2:
+    logging.error("❌ TELEGRAM_TOKEN format looks invalid. Verify with BotFather.")
+    sys.exit(1)
+
+# -------------------
+# Convert video to GIF
+# -------------------
 def convert_to_gif(input_path: str, output_path: str) -> str:
     """Convert any video to GIF and compress until <= 8MB."""
     logging.info("Converting to GIF: %s", input_path)
 
-    # Start with high quality
     fps = 20
     scale = 640
 
@@ -39,7 +59,6 @@ def convert_to_gif(input_path: str, output_path: str) -> str:
         if size <= MAX_FILE_SIZE:
             break
 
-        # Reduce quality progressively until <8MB
         logging.warning("GIF too large, reducing quality...")
         if fps > 12:
             fps -= 2
@@ -51,9 +70,10 @@ def convert_to_gif(input_path: str, output_path: str) -> str:
 
     return output_path
 
-# --- Upload to Catbox ---
+# -------------------
+# Upload to Catbox
+# -------------------
 def upload_to_catbox(file_path: str) -> str:
-    """Uploads the GIF to Catbox and returns the direct link."""
     logging.info("Uploading GIF to Catbox: %s", file_path)
 
     with open(file_path, "rb") as f:
@@ -69,13 +89,14 @@ def upload_to_catbox(file_path: str) -> str:
         logging.error("Catbox upload failed: %s", response.text)
         raise Exception("Catbox upload failed")
 
-# --- Handle Telegram media ---
+# -------------------
+# Telegram handler
+# -------------------
 async def handle_gif(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         message = update.message
         file = None
 
-        # Telegram wraps GIFs as MP4 animations, but we also accept videos/docs
         if message.animation:
             file = await message.animation.get_file()
         elif message.video:
@@ -86,26 +107,27 @@ async def handle_gif(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await message.reply_text("⚠️ Unsupported file type.")
             return
 
-        # Download the file to a temp folder
         with tempfile.TemporaryDirectory() as tmpdir:
             input_path = os.path.join(tmpdir, "input")
             output_path = os.path.join(tmpdir, "output.gif")
             await file.download_to_drive(input_path)
 
-            # Convert input → GIF
+            # Convert to GIF
             gif_path = convert_to_gif(input_path, output_path)
 
-            # Upload GIF to Catbox
+            # Upload to Catbox
             catbox_url = upload_to_catbox(gif_path)
 
-            # Send Catbox link back
+            # Reply with link
             await message.reply_text(f"✅ GIF uploaded:\n{catbox_url}")
 
     except Exception as e:
         logging.error("Error handling GIF: %s", e)
         await update.message.reply_text("❌ Failed to process GIF. Please try again later.")
 
-# --- Start bot ---
+# -------------------
+# Start bot
+# -------------------
 if __name__ == "__main__":
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(MessageHandler(
