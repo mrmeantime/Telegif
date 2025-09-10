@@ -1,17 +1,17 @@
 FROM python:3.11-slim
 
+# Install ffmpeg for GIF/MP4 processing
+RUN apt-get update && apt-get install -y ffmpeg && rm -rf /var/lib/apt/lists/*
+
+# Set working directory
 WORKDIR /app
 
-# Install dependencies
+# Copy dependencies and install
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy bot code
-COPY src/ src/
+# Copy source code
+COPY . .
 
-# Copy start script
-COPY start.sh .
-RUN chmod +x start.sh
-
-# Start bot
-CMD ["./start.sh"]
+# Run bot
+CMD ["python3", "src/bot.py"]
