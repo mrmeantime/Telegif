@@ -1,193 +1,81 @@
-#!/usr/bin/env python3
-import logging
 import os
-import sys
-import tempfile
 import requests
 import subprocess
-from pathlib import Path
+import logging
 from telegram import Update
-from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    MessageHandler,
-    ContextTypes,
-    filters,
-)
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 
-# -------------------------
-# Logging Setup
-# -------------------------
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.DEBUG,
-)
-logger = logging.getLogger(__name__)
+TOKEN = "YOUR_TELEGRAM_BOT_TOKEN"
+CATBOX_URL = "https://catbox.moe/user/api.php"
+MAX_FILE_SIZE = 8 * 1024 * 1024  # 8MB Telegram limit
 
-# -------------------------
-# Environment Variables
-# -------------------------
-BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-if not BOT_TOKEN:
-    logger.error("❌ TELEGRAM_BOT_TOKEN is not set!")
-    sys.exit(1)
+logging.basicConfig(level=logging.INFO)
 
-# -------------------------
-# FFMPEG UTILITIES
-# -------------------------
-def convert_to_gif(input_path: Path, output_path: Path):
-    """Convert MP4 or other video to GIF using ffmpeg."""
-    try:
+async def handle_gif(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message.document and not update.message.animation:
+        await update.message.reply_text("Please send me a GIF!")
+        return
+
+    # Detect if GIF is from document or animation
+    file = update.message.document or update.message.animation
+
+    # Download the file from Telegram
+    file_path = await context.bot.get_file(file.file_id)
+    original_path = f"downloads/{file.file_name}"
+    os.makedirs("downloads", exist_ok=True)
+    await file_path.download_to_drive(original_path)
+
+    logging.info(f"Downloaded GIF: {original_path}")
+
+    # Compress GIF using ffmpeg if bigger than 8MB
+    compressed_path = f"downloads/compressed_{file.file_name}"
+    file_size = os.path.getsize(original_path)
+
+    if file_size > MAX_FILE_SIZE:
+        logging.info(f"Compressing GIF {file.file_name} ({file_size} bytes)")
         cmd = [
-            "ffmpeg",
-            "-y",
-            "-i", str(input_path),
-            "-vf", "fps=15,scale=480:-1:flags=lanczos",
-            str(output_path)
+            "ffmpeg", "-y",
+            "-i", original_path,
+            "-vf", "scale=480:-1:flags=lanczos",
+            "-b:v", "900k",
+            compressed_path
         ]
-        subprocess.run(cmd, check=True)
-        logger.info(f"✅ Converted video to GIF: {output_path}")
-        return True
-    except subprocess.CalledProcessError as e:
-        logger.error(f"❌ Video to GIF conversion failed: {e}")
-        return False
+        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    else:
+        compressed_path = original_path
 
-def compress_gif(input_path: Path, output_path: Path):
-    """Compress GIF to stay under 8MB using ffmpeg."""
-    try:
-        cmd = [
-            "ffmpeg",
-            "-y",
-            "-i", str(input_path),
-            "-vf", "fps=12,scale=360:-1:flags=lanczos",
-            str(output_path)
-        ]
-        subprocess.run(cmd, check=True)
-        logger.info(f"✅ Compressed GIF saved: {output_path}")
-        return True
-    except subprocess.CalledProcessError as e:
-        logger.error(f"❌ GIF compression failed: {e}")
-        return False
+    # Upload GIF to catbox.moe
+    logging.info("Uploading GIF to catbox.moe...")
+    with open(compressed_path, "rb") as f:
+        response = requests.post(
+            CATBOX_URL,
+            data={"reqtype": "fileupload"},
+            files={"fileToUpload": f}
+        )
 
-# -------------------------
-# UPLOAD TO CATBOX
-# -------------------------
-def upload_to_catbox(file_path: Path) -> str:
-    """Upload a file to Catbox.moe and return the hosted URL."""
+    if response.status_code == 200:
+        catbox_url = response.text.strip()
+        logging.info(f"GIF hosted at: {catbox_url}")
+
+        # Send back the permanent link
+        await update.message.reply_text(f"✅ Your GIF is ready:\n{catbox_url}")
+    else:
+        logging.error(f"Catbox upload failed: {response.text}")
+        await update.message.reply_text("❌ Failed to upload GIF to catbox.moe.")
+
+    # Cleanup
     try:
-        url = "https://catbox.moe/user/api.php"
-        with open(file_path, "rb") as f:
-            response = requests.post(
-                url,
-                data={"reqtype": "fileupload"},
-                files={"fileToUpload": f}
-            )
-        if response.status_code == 200:
-            hosted_url = response.text.strip()
-            logger.info(f"✅ Uploaded to Catbox: {hosted_url}")
-            return hosted_url
-        else:
-            logger.error(f"❌ Catbox upload failed: {response.text}")
-            return None
+        os.remove(original_path)
+        if os.path.exists(compressed_path) and compressed_path != original_path:
+            os.remove(compressed_path)
     except Exception as e:
-        logger.exception(f"❌ Error uploading to Catbox: {e}")
-        return None
+        logging.warning(f"Cleanup failed: {e}")
 
-# -------------------------
-# START COMMAND
-# -------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "👋 Hi! Send me a GIF or short video.\n"
-        "I'll convert it, compress if needed, upload it to Catbox, "
-        "and send you a direct link under 8MB."
-    )
-
-# -------------------------
-# GIF / VIDEO HANDLER
-# -------------------------
-async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        message = update.message or update.edited_message
-        if not message:
-            return
-
-        # -------------------------
-        # Identify File Type
-        # -------------------------
-        if message.animation:
-            file_id = message.animation.file_id
-            original_name = message.animation.file_name or "file.gif"
-            logger.info(f"🎞️ Animation received: {original_name}")
-        elif message.video:
-            file_id = message.video.file_id
-            original_name = message.video.file_name or "file.mp4"
-            logger.info(f"📹 Video received: {original_name}")
-        else:
-            await update.message.reply_text("⚠️ Please send a GIF or video.")
-            return
-
-        # -------------------------
-        # Download File from Telegram
-        # -------------------------
-        bot = context.bot
-        file = await bot.get_file(file_id)
-
-        temp_dir = tempfile.mkdtemp()
-        input_path = Path(temp_dir) / original_name
-        gif_path = Path(temp_dir) / "converted.gif"
-        compressed_path = Path(temp_dir) / "compressed.gif"
-
-        await file.download_to_drive(input_path)
-        logger.info(f"✅ File downloaded: {input_path}")
-
-        # -------------------------
-        # Convert MP4 to GIF if needed
-        # -------------------------
-        if input_path.suffix.lower() == ".mp4":
-            logger.info("🔄 Converting MP4 to GIF...")
-            if not convert_to_gif(input_path, gif_path):
-                await update.message.reply_text("❌ Failed to convert video to GIF.")
-                return
-        else:
-            gif_path = input_path
-
-        # -------------------------
-        # Compress if output > 8MB
-        # -------------------------
-        final_path = gif_path
-        if gif_path.stat().st_size > 8 * 1024 * 1024:
-            logger.info("⚠️ GIF too large, compressing...")
-            if compress_gif(gif_path, compressed_path):
-                final_path = compressed_path
-
-        # -------------------------
-        # Upload to Catbox
-        # -------------------------
-        hosted_url = upload_to_catbox(final_path)
-        if hosted_url:
-            await update.message.reply_text(
-                f"✅ Your GIF is ready!\n\n🔗 {hosted_url}\n\n📌 Copy and paste this link anywhere."
-            )
-        else:
-            await update.message.reply_text("❌ Failed to upload GIF. Please try again later.")
-
-    except Exception as e:
-        logger.exception(f"❌ Error handling media: {e}")
-        await update.message.reply_text("⚠️ Something went wrong. Please try again later.")
-
-# -------------------------
-# MAIN ENTRY POINT
-# -------------------------
-def main():
-    logger.info("🚀 Starting Telegram GIF Export Bot...")
-
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.ANIMATION | filters.VIDEO, handle_media))
-
-    logger.info("📡 Bot is now running...")
-    app.run_polling(drop_pending_updates=True)
+    await update.message.reply_text("Send me a GIF, and I'll host it on catbox.moe!")
 
 if __name__ == "__main__":
-    main()
+    app = ApplicationBuilder().token(TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.Document.ALL | filters.Animation.ALL, handle_gif))
+    app.run_polling()
