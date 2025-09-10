@@ -1,64 +1,72 @@
-import ffmpeg
 import os
+import subprocess
 
-MAX_FILESIZE_MB = 8
+MAX_GIF_SIZE_MB = 8
 
-def convert_to_gif(input_path, output_path):
+async def convert_to_gif(input_path):
     """
-    Convert MP4 to GIF and compress until under 8MB if possible.
+    Converts a video/image/GIF to GIF format and compresses if needed.
+    Ensures the output is <= 8MB for Telegram.
     """
-    try:
-        # First pass: normal settings (480p, 15fps, full color)
-        _convert(input_path, output_path, scale=480, fps=15, colors=256)
+    base_output = input_path.rsplit(".", 1)[0]
+    output_path = f"{base_output}.gif"
 
-        if get_filesize_mb(output_path) <= MAX_FILESIZE_MB:
-            return output_path
+    # Initial conversion
+    await _run_ffmpeg_convert(input_path, output_path)
 
-        # Second pass: reduce resolution
-        _convert(input_path, output_path, scale=360, fps=15, colors=256)
-        if get_filesize_mb(output_path) <= MAX_FILESIZE_MB:
-            return output_path
+    # Check size and compress if needed
+    size_mb = get_filesize_mb(output_path)
+    if size_mb > MAX_GIF_SIZE_MB:
+        output_path = await compress_gif(output_path)
 
-        # Third pass: reduce FPS
-        _convert(input_path, output_path, scale=360, fps=10, colors=256)
-        if get_filesize_mb(output_path) <= MAX_FILESIZE_MB:
-            return output_path
+    return output_path
 
-        # Final pass: reduce colors
-        _convert(input_path, output_path, scale=320, fps=10, colors=128)
-        return output_path
+async def _run_ffmpeg_convert(input_path, output_path):
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", input_path,
+        "-vf", "fps=15,scale=480:-1:flags=lanczos",
+        "-pix_fmt", "rgb24",
+        output_path
+    ]
+    process = subprocess.run(cmd, capture_output=True)
+    if process.returncode != 0:
+        raise RuntimeError(process.stderr.decode())
 
-    except ffmpeg.Error as e:
-        print("FFmpeg error:", e)
-        return None
-
-
-def _convert(input_path, output_path, scale=480, fps=15, colors=256):
+async def compress_gif(input_path):
     """
-    Helper: perform actual ffmpeg conversion with palette optimization.
+    Iteratively compresses the GIF until it's <= 8MB.
+    Reduces frame rate and width progressively.
     """
-    palette = f"{output_path}.png"
+    current_path = input_path
+    size_mb = get_filesize_mb(current_path)
+    fps = 15
+    width = 480
 
-    # Step 1: Generate palette for optimal colors
-    ffmpeg.input(input_path).output(
-        palette,
-        vf=f"fps={fps},scale={scale}:-1:flags=lanczos,palettegen=max_colors={colors}"
-    ).overwrite_output().run(quiet=True)
+    while size_mb > MAX_GIF_SIZE_MB:
+        fps = max(5, fps - 2)
+        width = max(200, width - 50)
+        compressed_path = current_path.rsplit(".", 1)[0] + f"_compressed.gif"
 
-    # Step 2: Apply palette to final GIF
-    ffmpeg.input(input_path).filter(
-        "fps", fps
-    ).filter(
-        "scale", scale, -1, flags="lanczos"
-    ).filter_complex(
-        f"[0:v][1:v]paletteuse"
-    ).input(palette).output(
-        output_path, loop=0
-    ).overwrite_output().run(quiet=True)
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", current_path,
+            "-vf", f"fps={fps},scale={width}:-1:flags=lanczos",
+            "-pix_fmt", "rgb24",
+            compressed_path
+        ]
+        process = subprocess.run(cmd, capture_output=True)
+        if process.returncode != 0:
+            raise RuntimeError(process.stderr.decode())
 
-    os.remove(palette)  # Clean up temp palette
+        current_path = compressed_path
+        size_mb = get_filesize_mb(current_path)
 
+        if fps <= 5 and width <= 200:
+            # Bail out if it's still too big at extreme compression
+            break
 
-def get_filesize_mb(filepath):
-    size = os.path.getsize(filepath) / (1024 * 1024)
-    return round(size, 2)
+    return current_path
+
+def get_filesize_mb(path):
+    return os.path.getsize(path) / (1024 * 1024)
