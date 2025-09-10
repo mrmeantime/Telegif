@@ -1,72 +1,109 @@
+#!/usr/bin/env python3
 import logging
 import os
+import sys
+import tempfile
+import requests
+from pathlib import Path
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
+    CommandHandler,
     MessageHandler,
     ContextTypes,
-    filters
+    filters,
 )
-from src.ffmpeg_utils import convert_to_gif, get_filesize_mb
 
+# -------------------------
+# Logging Setup (Full Debug)
+# -------------------------
 logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.DEBUG,
-    format="%(asctime)s - %(levelname)s - %(name)s - %(message)s"
 )
+logger = logging.getLogger(__name__)
 
-async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# -------------------------
+# Environment Variables
+# -------------------------
+BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+if not BOT_TOKEN:
+    logger.error("❌ TELEGRAM_BOT_TOKEN is not set!")
+    sys.exit(1)
+
+# -------------------------
+# Start Command
+# -------------------------
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger.info(f"User {update.effective_user.id} started the bot.")
+    await update.message.reply_text("👋 Hi! Send me a GIF and I'll process it.")
+
+# -------------------------
+# GIF / Video Handler
+# -------------------------
+async def handle_gif(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        message = update.message
+        message = update.message or update.edited_message
+        if not message:
+            logger.warning("⚠️ Received update without message.")
+            return
 
-        # Debug: Log what Telegram actually sent
-        logging.info(f"Received message type: {message}")
-
-        # Handle different possible media types
-        file = None
         if message.animation:
-            file = await message.animation.get_file()
+            file_id = message.animation.file_id
+            logger.info(f"🎞️ GIF received: file_id={file_id}")
         elif message.video:
-            file = await message.video.get_file()
-        elif message.document:
-            file = await message.document.get_file()
+            file_id = message.video.file_id
+            logger.info(f"📹 Video received: file_id={file_id}")
         else:
-            await message.reply_text("⚠️ Please send a GIF or video.")
+            await update.message.reply_text("⚠️ Please send a GIF or video.")
             return
 
-        # Download file
-        file_path = f"/tmp/{file.file_path.split('/')[-1]}"
-        await file.download_to_drive(file_path)
-        logging.info(f"Downloaded: {file_path}")
+        # -------------------------
+        # Get File Info from Telegram
+        # -------------------------
+        bot = context.bot
+        file = await bot.get_file(file_id)
+        logger.debug(f"📥 Downloading file from {file.file_path}")
 
-        # Convert + compress if needed
-        gif_path = await convert_to_gif(file_path)
-        size_mb = get_filesize_mb(gif_path)
-        logging.info(f"Final GIF size: {size_mb:.2f} MB")
+        # Download to temp directory
+        temp_dir = tempfile.mkdtemp()
+        temp_path = Path(temp_dir) / "input.gif"
+        await file.download_to_drive(temp_path)
+        logger.info(f"✅ File saved: {temp_path}")
 
-        if size_mb > 8:
-            await message.reply_text(
-                "⚠️ Sorry, I couldn’t compress below 8 MB. Try a shorter clip."
-            )
-            return
+        # -------------------------
+        # TODO: Process GIF (FFmpeg)
+        # -------------------------
+        # Placeholder for GIF compression/export logic
+        # We'll add ffmpeg processing later
 
-        # Send optimized GIF back
-        with open(gif_path, "rb") as gif_file:
-            await message.reply_document(document=gif_file)
+        await update.message.reply_text("✅ GIF received and saved! Processing soon...")
 
     except Exception as e:
-        logging.exception("Error processing media")
-        await update.message.reply_text("⚠️ Something went wrong, please try again later.")
+        logger.exception(f"❌ Error handling GIF: {e}")
+        await update.message.reply_text("⚠️ Something went wrong while processing your GIF.")
 
+# -------------------------
+# Main Function
+# -------------------------
 def main():
-    token = os.getenv("TELEGRAM_BOT_TOKEN")
-    app = ApplicationBuilder().token(token).build()
+    logger.info("🚀 Starting Telegram GIF Export Bot...")
 
-    # Listen for videos, GIFs, and documents
-    media_filter = filters.ANIMATION | filters.VIDEO | filters.Document.ALL
-    app.add_handler(MessageHandler(media_filter, handle_media))
+    # Build app with polling
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    logging.info("🚀 Bot started. Waiting for GIFs or videos...")
-    app.run_polling()
+    # Commands
+    app.add_handler(CommandHandler("start", start))
 
+    # Handle GIFs & videos
+    app.add_handler(MessageHandler(filters.ANIMATION | filters.VIDEO, handle_gif))
+
+    # Start polling
+    logger.info("📡 Bot is running and polling for updates...")
+    app.run_polling(drop_pending_updates=True)
+
+# -------------------------
+# Entry Point
+# -------------------------
 if __name__ == "__main__":
     main()
