@@ -1,0 +1,20 @@
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environment
+.venv/
+env/
+venv/
+
+# OS files
+.DS_Store
+
+# Logs
+logs/
+*.log
+
+# Do not commit secrets
+.env
