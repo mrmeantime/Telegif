@@ -1,11 +1,9 @@
 import os
 import logging
 import tempfile
-import threading
-import signal
-import sys
-from flask import Flask
-from telegram import Update
+import asyncio
+from flask import Flask, request, jsonify
+from telegram import Update, Bot
 from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes, CommandHandler
 from src.ffmpeg_utils import convert_to_gif
 from src.uploader import upload_to_catbox
@@ -20,38 +18,91 @@ logger = logging.getLogger(__name__)
 # Get bot token from environment
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 if not TELEGRAM_BOT_TOKEN:
-    raise RuntimeError("❌ TELEGRAM_BOT_TOKEN is missing! Set it in Render environment variables")
+    raise RuntimeError("❌ TELEGRAM_BOT_TOKEN is missing!")
 
-# Create Flask app for health checks
+# Create Flask app
 app = Flask(__name__)
+
+# Initialize bot and application
+bot = Bot(token=TELEGRAM_BOT_TOKEN)
+telegram_app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
 
 @app.route('/')
 def health_check():
-    return "🤖 Telegram GIF Bot is running!", 200
+    return "🤖 Telegram GIF Bot is running with webhooks!", 200
 
 @app.route('/health')
 def health():
-    return {"status": "healthy", "service": "telegram-gif-bot"}, 200
+    return {"status": "healthy", "service": "telegram-gif-bot", "mode": "webhook"}, 200
 
-@app.route('/status')
-def status():
-    return {
-        "status": "running",
-        "bot_token_set": bool(TELEGRAM_BOT_TOKEN),
-        "service": "telegram-gif-bot"
-    }, 200
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    """Handle incoming webhook from Telegram"""
+    try:
+        # Get the JSON data from Telegram
+        json_data = request.get_json()
+        
+        if not json_data:
+            return "No data", 400
+            
+        logger.info(f"Received webhook data: {json_data}")
+        
+        # Create Update object
+        update = Update.de_json(json_data, bot)
+        
+        # Process the update asynchronously
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(telegram_app.process_update(update))
+        loop.close()
+        
+        return "OK", 200
+        
+    except Exception as e:
+        logger.error(f"Webhook error: {e}", exc_info=True)
+        return "Error", 500
 
-# Global variable to track if we should keep running
-keep_running = True
+@app.route('/set_webhook')
+def set_webhook():
+    """Endpoint to set up the webhook"""
+    try:
+        # Get the service URL from Render environment
+        service_url = os.environ.get('RENDER_EXTERNAL_URL')
+        if not service_url:
+            return {"error": "RENDER_EXTERNAL_URL not found"}, 400
+            
+        webhook_url = f"{service_url}/webhook"
+        
+        # Set webhook
+        result = bot.set_webhook(url=webhook_url)
+        logger.info(f"Webhook setup result: {result}")
+        
+        return {
+            "success": True,
+            "webhook_url": webhook_url,
+            "result": result
+        }, 200
+        
+    except Exception as e:
+        logger.error(f"Failed to set webhook: {e}")
+        return {"error": str(e)}, 500
 
-def signal_handler(signum, frame):
-    global keep_running
-    logger.info(f"Received signal {signum}, shutting down gracefully...")
-    keep_running = False
-
-# Set up signal handlers
-signal.signal(signal.SIGTERM, signal_handler)
-signal.signal(signal.SIGINT, signal_handler)
+@app.route('/webhook_info')
+def webhook_info():
+    """Get current webhook information"""
+    try:
+        webhook_info = bot.get_webhook_info()
+        return {
+            "url": webhook_info.url,
+            "has_custom_certificate": webhook_info.has_custom_certificate,
+            "pending_update_count": webhook_info.pending_update_count,
+            "last_error_date": webhook_info.last_error_date,
+            "last_error_message": webhook_info.last_error_message,
+            "max_connections": webhook_info.max_connections,
+            "allowed_updates": webhook_info.allowed_updates
+        }, 200
+    except Exception as e:
+        return {"error": str(e)}, 500
 
 async def handle_gif(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle 'GIF' messages (actually MP4) and convert to real GIF"""
@@ -165,54 +216,16 @@ Just send me any GIF or video to convert! 🎬
     """
     await update.message.reply_text(help_text)
 
-def run_flask():
-    """Run Flask app in a separate thread"""
-    try:
-        port = int(os.environ.get('PORT', 10000))
-        logger.info(f"Starting Flask server on port {port}")
-        app.run(host='0.0.0.0', port=port, debug=False)
-    except Exception as e:
-        logger.error(f"Flask server error: {e}")
-
-async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Log the error and send a telegram message to notify the developer."""
-    logger.error(f"Exception while handling an update: {context.error}", exc_info=context.error)
-
-def main():
-    """Start the bot and Flask server"""
-    try:
-        # Start Flask server in background thread
-        flask_thread = threading.Thread(target=run_flask, daemon=True)
-        flask_thread.start()
-        logger.info(f"🌐 Flask health check server started")
-        
-        # Start Telegram bot
-        logger.info("Initializing Telegram bot...")
-        telegram_app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
-        
-        # Add error handler
-        telegram_app.add_error_handler(error_handler)
-        
-        # Add command handlers
-        telegram_app.add_handler(CommandHandler("start", start_command))
-        telegram_app.add_handler(CommandHandler("help", help_command))
-        
-        # Add media handler for GIFs/videos/animations
-        telegram_app.add_handler(MessageHandler(
-            filters.ANIMATION | filters.VIDEO | filters.Document.VIDEO, 
-            handle_gif
-        ))
-        
-        # Start polling
-        logger.info("🚀 Starting Telegram bot polling...")
-        telegram_app.run_polling(
-            allowed_updates=Update.ALL_TYPES,
-            drop_pending_updates=True
-        )
-        
-    except Exception as e:
-        logger.error(f"Fatal error in main: {e}", exc_info=True)
-        sys.exit(1)
-
 if __name__ == "__main__":
-    main()
+    # Add handlers to telegram app
+    telegram_app.add_handler(CommandHandler("start", start_command))
+    telegram_app.add_handler(CommandHandler("help", help_command))
+    telegram_app.add_handler(MessageHandler(
+        filters.ANIMATION | filters.VIDEO | filters.Document.VIDEO, 
+        handle_gif
+    ))
+    
+    # Run Flask app
+    port = int(os.environ.get('PORT', 10000))
+    logger.info(f"🚀 Starting webhook server on port {port}")
+    app.run(host='0.0.0.0', port=port, debug=False)
