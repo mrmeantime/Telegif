@@ -4,8 +4,8 @@ services:
     env: python
     region: singapore
     plan: free
-    buildCommand: pip install -r requirements.txt
+    buildCommand: pip install -r requirements.txt && chmod +x start.sh
     startCommand: ./start.sh
     envVars:
-      - key: TELEGRAM_BOT_TOKEN
+      - key: TELEGRAM_TOKEN
         sync: false
