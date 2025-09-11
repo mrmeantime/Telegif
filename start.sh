@@ -1,10 +1,10 @@
 #!/bin/bash
 set -e
 
-echo "Running debug script..."
+echo "Starting Telegram GIF Bot..."
 echo "Current directory: $(pwd)"
 echo "Files in current directory:"
 ls -la
 
-# Use relative path instead of absolute
-exec python3 src/debug.py
+# Run the actual bot instead of debug script
+exec python3 src/bot.py
