@@ -47,19 +47,27 @@ def init_bot():
             bot_loop = asyncio.new_event_loop()
             asyncio.set_event_loop(bot_loop)
             
-            # Initialize bot and app
-            bot = Bot(token=TELEGRAM_BOT_TOKEN)
-            telegram_app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+            async def setup_bot():
+                global bot, telegram_app
+                # Initialize bot and app
+                bot = Bot(token=TELEGRAM_BOT_TOKEN)
+                telegram_app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+                
+                # Add handlers
+                telegram_app.add_handler(CommandHandler("start", start_command))
+                telegram_app.add_handler(CommandHandler("help", help_command))
+                telegram_app.add_handler(MessageHandler(
+                    filters.ANIMATION | filters.VIDEO | filters.Document.VIDEO | filters.TEXT, 
+                    handle_message
+                ))
+                
+                # IMPORTANT: Initialize the application
+                await telegram_app.initialize()
+                
+                logger.info("✅ Bot initialized and ready for webhooks")
             
-            # Add handlers
-            telegram_app.add_handler(CommandHandler("start", start_command))
-            telegram_app.add_handler(CommandHandler("help", help_command))
-            telegram_app.add_handler(MessageHandler(
-                filters.ANIMATION | filters.VIDEO | filters.Document.VIDEO | filters.TEXT, 
-                handle_message
-            ))
-            
-            logger.info("✅ Bot initialized successfully in dedicated thread")
+            # Run setup
+            bot_loop.run_until_complete(setup_bot())
             
             # Keep the event loop running
             bot_loop.run_forever()
@@ -73,7 +81,7 @@ def init_bot():
     
     # Wait a moment for initialization
     import time
-    time.sleep(2)
+    time.sleep(3)  # Give more time for proper initialization
 
 @app.route('/')
 def health_check():
@@ -82,11 +90,13 @@ def health_check():
 @app.route('/health')
 def health():
     bot_status = "connected" if bot else "error"
+    app_status = "initialized" if telegram_app else "not_initialized"
     return {
         "status": "healthy", 
         "service": "telegram-gif-bot", 
         "mode": "webhook",
         "bot_status": bot_status,
+        "app_status": app_status,
         "token_set": bool(TELEGRAM_BOT_TOKEN)
     }, 200
 
@@ -186,7 +196,8 @@ def test_bot():
             "bot_username": me.username,
             "bot_name": me.first_name,
             "bot_id": me.id,
-            "token_working": True
+            "token_working": True,
+            "app_initialized": bool(telegram_app)
         }, 200
     except Exception as e:
         logger.error(f"Bot test failed: {e}")
@@ -196,12 +207,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle all messages - GIFs, videos, and text"""
     try:
         message = update.message
+        logger.info(f"Processing message from user {message.from_user.id}")
         
         # Handle text messages
         if message.text:
             if message.text.startswith('/'):
                 return  # Let command handlers deal with commands
             await message.reply_text(f"✅ Webhook working! You said: {message.text}")
+            logger.info("Sent echo response")
             return
         
         # Handle media messages (GIFs, videos, etc.)
@@ -217,7 +230,7 @@ async def handle_gif(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle 'GIF' messages (actually MP4) and convert to real GIF"""
     try:
         message = update.message
-        logger.info(f"Received media from user {message.from_user.id}")
+        logger.info(f"Starting GIF processing for user {message.from_user.id}")
         
         # Determine file type and get file object
         if message.animation:
