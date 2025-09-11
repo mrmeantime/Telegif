@@ -1,17 +1,18 @@
 FROM python:3.11-slim
 
-# Install ffmpeg for GIF/MP4 processing
+# Install ffmpeg
 RUN apt-get update && apt-get install -y ffmpeg && rm -rf /var/lib/apt/lists/*
 
-# Set working directory
+# Set workdir
 WORKDIR /app
 
-# Copy dependencies and install
+# Copy requirements first (for caching)
 COPY requirements.txt .
+
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy source code
-COPY . .
+# Copy app
+COPY src ./src
 
-# Run bot
+# Run debug script
 CMD ["python3", "src/debug_startup.py"]
