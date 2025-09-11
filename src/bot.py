@@ -31,6 +31,18 @@ except Exception as e:
     bot = None
     telegram_app = None
 
+def run_async(coro):
+    """Helper function to run async code in sync context"""
+    try:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        result = loop.run_until_complete(coro)
+        loop.close()
+        return result
+    except Exception as e:
+        logger.error(f"Async execution error: {e}")
+        raise
+
 @app.route('/')
 def health_check():
     return "🤖 Telegram GIF Bot is running with webhooks!", 200
@@ -66,10 +78,7 @@ def webhook():
         update = Update.de_json(json_data, bot)
         
         # Process the update asynchronously
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(telegram_app.process_update(update))
-        loop.close()
+        run_async(telegram_app.process_update(update))
         
         return "OK", 200
         
@@ -84,37 +93,24 @@ def set_webhook():
         if not bot:
             return {"error": "Bot not initialized", "token_set": bool(TELEGRAM_BOT_TOKEN)}, 500
         
-        # Try different ways to get the service URL
-        service_url = None
-        
-        # Method 1: Render environment variable
-        service_url = os.environ.get('RENDER_EXTERNAL_URL')
-        
-        # Method 2: Construct from request
-        if not service_url:
-            service_url = f"https://{request.host}"
-            
-        # Method 3: Hard-code for your service
-        if not service_url or 'localhost' in service_url:
-            service_url = "https://telegif.onrender.com"
-        
+        # Construct webhook URL
+        service_url = "https://telegif.onrender.com"
         webhook_url = f"{service_url}/webhook"
         
         logger.info(f"Setting webhook to: {webhook_url}")
         
-        # Set webhook with better error handling
-        result = bot.set_webhook(
+        # Set webhook (run async function synchronously)
+        result = run_async(bot.set_webhook(
             url=webhook_url,
-            drop_pending_updates=True  # Clear any pending updates
-        )
+            drop_pending_updates=True
+        ))
         
         logger.info(f"Webhook setup result: {result}")
         
         return {
             "success": True,
             "webhook_url": webhook_url,
-            "result": result,
-            "service_url_source": "constructed" if not os.environ.get('RENDER_EXTERNAL_URL') else "env_var"
+            "result": result
         }, 200
         
     except Exception as e:
@@ -132,7 +128,7 @@ def webhook_info():
         if not bot:
             return {"error": "Bot not initialized"}, 500
             
-        webhook_info = bot.get_webhook_info()
+        webhook_info = run_async(bot.get_webhook_info())
         return {
             "url": webhook_info.url,
             "has_custom_certificate": webhook_info.has_custom_certificate,
@@ -153,7 +149,7 @@ def test_bot():
         if not bot:
             return {"error": "Bot not initialized"}, 500
             
-        me = bot.get_me()
+        me = run_async(bot.get_me())
         return {
             "bot_username": me.username,
             "bot_name": me.first_name,
@@ -164,12 +160,12 @@ def test_bot():
         logger.error(f"Bot test failed: {e}")
         return {"error": str(e), "token_working": False}, 500
 
-# Your existing handler functions here...
+# Simplified handlers for testing
 async def handle_gif(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle 'GIF' messages - simplified for now"""
     try:
         message = update.message
-        await message.reply_text("🔄 GIF processing is working! (Webhook successful)")
+        await message.reply_text("🔄 Webhook is working! GIF processing will be added back soon.")
         logger.info(f"Successfully processed message from {message.from_user.id}")
     except Exception as e:
         logger.error(f"Error in handle_gif: {e}")
@@ -180,16 +176,28 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 🎬 **Telegram GIF Converter Bot**
 
 ✅ Webhook mode active!
-Send me a GIF to test the conversion.
+Bot is working and receiving messages.
+
+Send me any message to test!
     """
     await update.message.reply_text(welcome_text)
+
+async def echo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Echo any text message for testing"""
+    try:
+        message = update.message
+        await message.reply_text(f"✅ Webhook working! You said: {message.text}")
+        logger.info(f"Echo response sent to {message.from_user.id}")
+    except Exception as e:
+        logger.error(f"Error in echo_handler: {e}")
 
 if __name__ == "__main__":
     # Add handlers to telegram app
     if telegram_app:
         telegram_app.add_handler(CommandHandler("start", start_command))
+        telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo_handler))
         telegram_app.add_handler(MessageHandler(
-            filters.ANIMATION | filters.VIDEO | filters.Document.VIDEO | filters.TEXT, 
+            filters.ANIMATION | filters.VIDEO | filters.Document.VIDEO, 
             handle_gif
         ))
     
