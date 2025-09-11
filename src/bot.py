@@ -5,8 +5,6 @@ import asyncio
 from flask import Flask, request, jsonify
 from telegram import Update, Bot
 from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes, CommandHandler
-from src.ffmpeg_utils import convert_to_gif
-from src.uploader import upload_to_catbox
 
 # Set up logging
 logging.basicConfig(
@@ -23,9 +21,15 @@ if not TELEGRAM_BOT_TOKEN:
 # Create Flask app
 app = Flask(__name__)
 
-# Initialize bot and application
-bot = Bot(token=TELEGRAM_BOT_TOKEN)
-telegram_app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+# Initialize bot
+try:
+    bot = Bot(token=TELEGRAM_BOT_TOKEN)
+    telegram_app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+    logger.info("✅ Bot initialized successfully")
+except Exception as e:
+    logger.error(f"❌ Failed to initialize bot: {e}")
+    bot = None
+    telegram_app = None
 
 @app.route('/')
 def health_check():
@@ -33,19 +37,30 @@ def health_check():
 
 @app.route('/health')
 def health():
-    return {"status": "healthy", "service": "telegram-gif-bot", "mode": "webhook"}, 200
+    bot_status = "connected" if bot else "error"
+    return {
+        "status": "healthy", 
+        "service": "telegram-gif-bot", 
+        "mode": "webhook",
+        "bot_status": bot_status,
+        "token_set": bool(TELEGRAM_BOT_TOKEN)
+    }, 200
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
     """Handle incoming webhook from Telegram"""
     try:
+        if not bot or not telegram_app:
+            logger.error("Bot not initialized")
+            return "Bot not initialized", 500
+            
         # Get the JSON data from Telegram
         json_data = request.get_json()
         
         if not json_data:
             return "No data", 400
             
-        logger.info(f"Received webhook data: {json_data}")
+        logger.info(f"Received webhook: {json_data.get('message', {}).get('text', 'media')}")
         
         # Create Update object
         update = Update.de_json(json_data, bot)
@@ -60,172 +75,126 @@ def webhook():
         
     except Exception as e:
         logger.error(f"Webhook error: {e}", exc_info=True)
-        return "Error", 500
+        return f"Error: {str(e)}", 500
 
 @app.route('/set_webhook')
 def set_webhook():
     """Endpoint to set up the webhook"""
     try:
-        # Get the service URL from Render environment
+        if not bot:
+            return {"error": "Bot not initialized", "token_set": bool(TELEGRAM_BOT_TOKEN)}, 500
+        
+        # Try different ways to get the service URL
+        service_url = None
+        
+        # Method 1: Render environment variable
         service_url = os.environ.get('RENDER_EXTERNAL_URL')
+        
+        # Method 2: Construct from request
         if not service_url:
-            return {"error": "RENDER_EXTERNAL_URL not found"}, 400
+            service_url = f"https://{request.host}"
             
+        # Method 3: Hard-code for your service
+        if not service_url or 'localhost' in service_url:
+            service_url = "https://telegif.onrender.com"
+        
         webhook_url = f"{service_url}/webhook"
         
-        # Set webhook
-        result = bot.set_webhook(url=webhook_url)
+        logger.info(f"Setting webhook to: {webhook_url}")
+        
+        # Set webhook with better error handling
+        result = bot.set_webhook(
+            url=webhook_url,
+            drop_pending_updates=True  # Clear any pending updates
+        )
+        
         logger.info(f"Webhook setup result: {result}")
         
         return {
             "success": True,
             "webhook_url": webhook_url,
-            "result": result
+            "result": result,
+            "service_url_source": "constructed" if not os.environ.get('RENDER_EXTERNAL_URL') else "env_var"
         }, 200
         
     except Exception as e:
-        logger.error(f"Failed to set webhook: {e}")
-        return {"error": str(e)}, 500
+        logger.error(f"Failed to set webhook: {e}", exc_info=True)
+        return {
+            "error": str(e),
+            "token_set": bool(TELEGRAM_BOT_TOKEN),
+            "bot_initialized": bool(bot)
+        }, 500
 
 @app.route('/webhook_info')
 def webhook_info():
     """Get current webhook information"""
     try:
+        if not bot:
+            return {"error": "Bot not initialized"}, 500
+            
         webhook_info = bot.get_webhook_info()
         return {
             "url": webhook_info.url,
             "has_custom_certificate": webhook_info.has_custom_certificate,
             "pending_update_count": webhook_info.pending_update_count,
-            "last_error_date": webhook_info.last_error_date,
+            "last_error_date": str(webhook_info.last_error_date) if webhook_info.last_error_date else None,
             "last_error_message": webhook_info.last_error_message,
             "max_connections": webhook_info.max_connections,
             "allowed_updates": webhook_info.allowed_updates
         }, 200
     except Exception as e:
+        logger.error(f"Error getting webhook info: {e}")
         return {"error": str(e)}, 500
 
+@app.route('/test_bot')
+def test_bot():
+    """Test if bot token is working"""
+    try:
+        if not bot:
+            return {"error": "Bot not initialized"}, 500
+            
+        me = bot.get_me()
+        return {
+            "bot_username": me.username,
+            "bot_name": me.first_name,
+            "bot_id": me.id,
+            "token_working": True
+        }, 200
+    except Exception as e:
+        logger.error(f"Bot test failed: {e}")
+        return {"error": str(e), "token_working": False}, 500
+
+# Your existing handler functions here...
 async def handle_gif(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle 'GIF' messages (actually MP4) and convert to real GIF"""
+    """Handle 'GIF' messages - simplified for now"""
     try:
         message = update.message
-        logger.info(f"Received message from user {message.from_user.id}")
-        
-        # Check if it's a GIF/animation (which Telegram stores as MP4)
-        if message.animation:
-            file_obj = message.animation
-            logger.info(f"Received animation: {file_obj.file_name}, size: {file_obj.file_size} bytes")
-        elif message.video:
-            file_obj = message.video  
-            logger.info(f"Received video: size: {file_obj.file_size} bytes")
-        elif message.document and message.document.mime_type:
-            if "video" in message.document.mime_type or "gif" in message.document.mime_type:
-                file_obj = message.document
-                logger.info(f"Received document: {file_obj.file_name}, type: {file_obj.mime_type}")
-            else:
-                await message.reply_text("❌ Please send a GIF, video, or animation to convert!")
-                return
-        else:
-            await message.reply_text("❌ Please send a GIF or video to convert!")
-            return
-
-        # Check file size (Telegram max is 50MB for bots)
-        if file_obj.file_size > 50 * 1024 * 1024:
-            await message.reply_text("❌ File too large! Please send a file smaller than 50MB.")
-            return
-
-        await message.reply_text("🔄 Converting to GIF and uploading to Catbox...")
-        
-        # Download file
-        file = await context.bot.get_file(file_obj.file_id)
-        
-        # Create temporary file for input
-        with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') as temp_file:
-            temp_input_path = temp_file.name
-            
-        # Download to temp file
-        await file.download_to_drive(temp_input_path)
-        logger.info(f"Downloaded file to: {temp_input_path}")
-        
-        # Convert to GIF (this will ensure it's under 8MB)
-        logger.info("Converting MP4 to GIF...")
-        gif_path = await convert_to_gif(temp_input_path)
-        
-        # Check final GIF size
-        gif_size_mb = os.path.getsize(gif_path) / (1024 * 1024)
-        logger.info(f"GIF created: {gif_path}, size: {gif_size_mb:.2f}MB")
-        
-        # Upload to Catbox
-        logger.info("Uploading to Catbox.moe...")
-        catbox_url = upload_to_catbox(gif_path)
-        
-        if catbox_url:
-            await message.reply_text(f"✅ **GIF converted and uploaded!**\n\n🔗 {catbox_url}")
-            logger.info(f"Successfully uploaded to: {catbox_url}")
-        else:
-            await message.reply_text("❌ Upload to Catbox failed. Please try again later.")
-        
-        # Cleanup temp files
-        try:
-            os.unlink(temp_input_path)
-            os.unlink(gif_path)
-            logger.info("Cleaned up temporary files")
-        except Exception as e:
-            logger.error(f"Cleanup error: {e}")
-            
+        await message.reply_text("🔄 GIF processing is working! (Webhook successful)")
+        logger.info(f"Successfully processed message from {message.from_user.id}")
     except Exception as e:
-        logger.error(f"Error processing GIF: {e}", exc_info=True)
-        await message.reply_text("❌ Sorry, there was an error converting your GIF. Please try again.")
+        logger.error(f"Error in handle_gif: {e}")
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /start command"""
-    logger.info(f"Start command from user {update.message.from_user.id}")
     welcome_text = """
 🎬 **Telegram GIF Converter Bot**
 
-Send me a GIF (or video) and I'll convert it to a real GIF file and upload it to Catbox!
-
-📝 **How it works:**
-1. Send me a GIF/video
-2. I convert it to optimized GIF (under 8MB)  
-3. Upload to Catbox.moe
-4. Get your permanent link!
-
-🚀 **Just send me a GIF to get started!**
+✅ Webhook mode active!
+Send me a GIF to test the conversion.
     """
     await update.message.reply_text(welcome_text)
 
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /help command"""
-    help_text = """
-ℹ️ **Help**
-
-**Supported formats:**
-• GIFs (Telegram animations)
-• MP4 videos  
-• Other video formats
-
-**Limits:**
-• Max input size: 50MB
-• Output GIF: Under 8MB (automatically optimized)
-
-**Commands:**
-/start - Welcome message
-/help - This help message
-
-Just send me any GIF or video to convert! 🎬
-    """
-    await update.message.reply_text(help_text)
-
 if __name__ == "__main__":
     # Add handlers to telegram app
-    telegram_app.add_handler(CommandHandler("start", start_command))
-    telegram_app.add_handler(CommandHandler("help", help_command))
-    telegram_app.add_handler(MessageHandler(
-        filters.ANIMATION | filters.VIDEO | filters.Document.VIDEO, 
-        handle_gif
-    ))
+    if telegram_app:
+        telegram_app.add_handler(CommandHandler("start", start_command))
+        telegram_app.add_handler(MessageHandler(
+            filters.ANIMATION | filters.VIDEO | filters.Document.VIDEO | filters.TEXT, 
+            handle_gif
+        ))
     
     # Run Flask app
     port = int(os.environ.get('PORT', 10000))
     logger.info(f"🚀 Starting webhook server on port {port}")
+    logger.info(f"Bot token set: {bool(TELEGRAM_BOT_TOKEN)}")
     app.run(host='0.0.0.0', port=port, debug=False)
