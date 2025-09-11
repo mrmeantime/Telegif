@@ -1,6 +1,8 @@
 import os
 import logging
 import tempfile
+import threading
+from flask import Flask
 from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes, CommandHandler
 from src.ffmpeg_utils import convert_to_gif
@@ -13,6 +15,17 @@ logger = logging.getLogger(__name__)
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 if not TELEGRAM_BOT_TOKEN:
     raise RuntimeError("❌ TELEGRAM_BOT_TOKEN is missing! Set it in Render environment variables")
+
+# Create Flask app for health checks
+app = Flask(__name__)
+
+@app.route('/')
+def health_check():
+    return "🤖 Telegram GIF Bot is running!", 200
+
+@app.route('/health')
+def health():
+    return {"status": "healthy", "service": "telegram-gif-bot"}, 200
 
 async def handle_gif(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle 'GIF' messages (actually MP4) and convert to real GIF"""
@@ -124,23 +137,34 @@ Just send me any GIF or video to convert! 🎬
     """
     await update.message.reply_text(help_text)
 
+def run_flask():
+    """Run Flask app in a separate thread"""
+    port = int(os.environ.get('PORT', 10000))
+    app.run(host='0.0.0.0', port=port, debug=False)
+
 def main():
-    """Start the bot"""
-    app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+    """Start the bot and Flask server"""
+    # Start Flask server in background thread
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
+    flask_thread.start()
+    logger.info(f"🌐 Flask health check server started on port {os.environ.get('PORT', 10000)}")
+    
+    # Start Telegram bot
+    telegram_app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
     
     # Add command handlers
-    app.add_handler(CommandHandler("start", start_command))
-    app.add_handler(CommandHandler("help", help_command))
+    telegram_app.add_handler(CommandHandler("start", start_command))
+    telegram_app.add_handler(CommandHandler("help", help_command))
     
     # Add media handler for GIFs/videos/animations
-    app.add_handler(MessageHandler(
+    telegram_app.add_handler(MessageHandler(
         filters.ANIMATION | filters.VIDEO | filters.Document.VIDEO, 
         handle_gif
     ))
     
     # Start polling
     logger.info("🚀 Telegram GIF Bot started! Waiting for GIFs...")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    telegram_app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
     main()
