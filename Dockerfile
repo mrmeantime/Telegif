@@ -1,18 +1,20 @@
+# Use slim Python base image
 FROM python:3.11-slim
 
-# Install ffmpeg
-RUN apt-get update && apt-get install -y ffmpeg && rm -rf /var/lib/apt/lists/*
-
-# Set workdir
+# Set working directory
 WORKDIR /app
 
-# Copy requirements first (for caching)
-COPY requirements.txt .
+# Copy project files
+COPY . /app
 
-RUN pip install --no-cache-dir -r requirements.txt
+# Ensure start.sh is executable
+RUN chmod +x /app/start.sh
 
-# Copy app
-COPY src ./src
+# Install dependencies if you need any (optional for debug)
+# RUN pip install -r requirements.txt
 
-# Run debug script
-CMD ["python3", "src/debug_startup.py"]
+# Set environment variables
+ENV PYTHONUNBUFFERED=1
+
+# Run start.sh
+CMD ["/app/start.sh"]
