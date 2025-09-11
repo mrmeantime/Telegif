@@ -2,4 +2,9 @@
 set -e
 
 echo "Running debug script..."
-exec python3 /app/src/debug.py
+echo "Current directory: $(pwd)"
+echo "Files in current directory:"
+ls -la
+
+# Use relative path instead of absolute
+exec python3 src/debug.py
