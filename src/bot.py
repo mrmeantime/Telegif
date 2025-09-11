@@ -2,13 +2,19 @@ import os
 import logging
 import tempfile
 import threading
+import signal
+import sys
 from flask import Flask
 from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes, CommandHandler
 from src.ffmpeg_utils import convert_to_gif
 from src.uploader import upload_to_catbox
 
-logging.basicConfig(level=logging.INFO)
+# Set up logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
 # Get bot token from environment
@@ -27,10 +33,31 @@ def health_check():
 def health():
     return {"status": "healthy", "service": "telegram-gif-bot"}, 200
 
+@app.route('/status')
+def status():
+    return {
+        "status": "running",
+        "bot_token_set": bool(TELEGRAM_BOT_TOKEN),
+        "service": "telegram-gif-bot"
+    }, 200
+
+# Global variable to track if we should keep running
+keep_running = True
+
+def signal_handler(signum, frame):
+    global keep_running
+    logger.info(f"Received signal {signum}, shutting down gracefully...")
+    keep_running = False
+
+# Set up signal handlers
+signal.signal(signal.SIGTERM, signal_handler)
+signal.signal(signal.SIGINT, signal_handler)
+
 async def handle_gif(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle 'GIF' messages (actually MP4) and convert to real GIF"""
     try:
         message = update.message
+        logger.info(f"Received message from user {message.from_user.id}")
         
         # Check if it's a GIF/animation (which Telegram stores as MP4)
         if message.animation:
@@ -95,11 +122,12 @@ async def handle_gif(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.error(f"Cleanup error: {e}")
             
     except Exception as e:
-        logger.error(f"Error processing GIF: {e}")
+        logger.error(f"Error processing GIF: {e}", exc_info=True)
         await message.reply_text("❌ Sorry, there was an error converting your GIF. Please try again.")
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /start command"""
+    logger.info(f"Start command from user {update.message.from_user.id}")
     welcome_text = """
 🎬 **Telegram GIF Converter Bot**
 
@@ -139,32 +167,52 @@ Just send me any GIF or video to convert! 🎬
 
 def run_flask():
     """Run Flask app in a separate thread"""
-    port = int(os.environ.get('PORT', 10000))
-    app.run(host='0.0.0.0', port=port, debug=False)
+    try:
+        port = int(os.environ.get('PORT', 10000))
+        logger.info(f"Starting Flask server on port {port}")
+        app.run(host='0.0.0.0', port=port, debug=False)
+    except Exception as e:
+        logger.error(f"Flask server error: {e}")
+
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Log the error and send a telegram message to notify the developer."""
+    logger.error(f"Exception while handling an update: {context.error}", exc_info=context.error)
 
 def main():
     """Start the bot and Flask server"""
-    # Start Flask server in background thread
-    flask_thread = threading.Thread(target=run_flask, daemon=True)
-    flask_thread.start()
-    logger.info(f"🌐 Flask health check server started on port {os.environ.get('PORT', 10000)}")
-    
-    # Start Telegram bot
-    telegram_app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
-    
-    # Add command handlers
-    telegram_app.add_handler(CommandHandler("start", start_command))
-    telegram_app.add_handler(CommandHandler("help", help_command))
-    
-    # Add media handler for GIFs/videos/animations
-    telegram_app.add_handler(MessageHandler(
-        filters.ANIMATION | filters.VIDEO | filters.Document.VIDEO, 
-        handle_gif
-    ))
-    
-    # Start polling
-    logger.info("🚀 Telegram GIF Bot started! Waiting for GIFs...")
-    telegram_app.run_polling(allowed_updates=Update.ALL_TYPES)
+    try:
+        # Start Flask server in background thread
+        flask_thread = threading.Thread(target=run_flask, daemon=True)
+        flask_thread.start()
+        logger.info(f"🌐 Flask health check server started")
+        
+        # Start Telegram bot
+        logger.info("Initializing Telegram bot...")
+        telegram_app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+        
+        # Add error handler
+        telegram_app.add_error_handler(error_handler)
+        
+        # Add command handlers
+        telegram_app.add_handler(CommandHandler("start", start_command))
+        telegram_app.add_handler(CommandHandler("help", help_command))
+        
+        # Add media handler for GIFs/videos/animations
+        telegram_app.add_handler(MessageHandler(
+            filters.ANIMATION | filters.VIDEO | filters.Document.VIDEO, 
+            handle_gif
+        ))
+        
+        # Start polling
+        logger.info("🚀 Starting Telegram bot polling...")
+        telegram_app.run_polling(
+            allowed_updates=Update.ALL_TYPES,
+            drop_pending_updates=True
+        )
+        
+    except Exception as e:
+        logger.error(f"Fatal error in main: {e}", exc_info=True)
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()
