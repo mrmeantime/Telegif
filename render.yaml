@@ -4,8 +4,21 @@ services:
     env: python
     region: singapore
     plan: free
-    buildCommand: pip install -r requirements.txt && chmod +x start.sh
-    startCommand: ./start.sh
+    buildCommand: |
+      echo "=== BUILD START ==="
+      pip install --upgrade pip
+      pip install -r requirements.txt
+      echo "=== BUILD COMPLETE ==="
+    startCommand: |
+      echo "=== START COMMAND ==="
+      echo "Python version: $(python3 --version)"
+      echo "Current directory: $(pwd)"
+      echo "Directory contents:"
+      ls -la
+      echo "src directory contents:"
+      ls -la src/
+      echo "=== RUNNING DEBUG ==="
+      python3 src/debug.py
     envVars:
-      - key: TELEGRAM_TOKEN
+      - key: TELEGRAM_BOT_TOKEN
         sync: false
