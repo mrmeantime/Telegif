@@ -1,20 +1,31 @@
-# Use slim Python base image
 FROM python:3.11-slim
+
+# Install FFmpeg and other dependencies
+RUN apt-get update && apt-get install -y \
+    ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
 
 # Set working directory
 WORKDIR /app
 
-# Copy project files
-COPY . /app
+# Copy requirements first for better caching
+COPY requirements.txt .
 
-# Ensure start.sh is executable
-RUN chmod +x /app/start.sh
+# Install Python dependencies
+RUN pip install --no-cache-dir -r requirements.txt
 
-# Install dependencies if you need any (optional for debug)
-# RUN pip install -r requirements.txt
+# Copy application code
+COPY . .
+
+# Create temp directory for file processing
+RUN mkdir -p /app/temp
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1
+ENV PYTHONPATH=/app
 
-# Run start.sh
-CMD ["/app/start.sh"]
+# Make start.sh executable
+RUN chmod +x start.sh
+
+# Run start.sh (which runs the bot)
+CMD ["./start.sh"]
