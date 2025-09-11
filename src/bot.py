@@ -3,6 +3,7 @@ import logging
 import tempfile
 import asyncio
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from flask import Flask, request, jsonify
 from telegram import Update, Bot
@@ -31,6 +32,17 @@ telegram_app = None
 bot_loop = None
 executor = ThreadPoolExecutor(max_workers=1)
 
+# Message deduplication - store processed message IDs
+processed_messages = set()
+MAX_PROCESSED_MESSAGES = 1000  # Keep last 1000 message IDs
+
+def clean_processed_messages():
+    """Clean old message IDs to prevent memory bloat"""
+    global processed_messages
+    if len(processed_messages) > MAX_PROCESSED_MESSAGES:
+        # Keep only recent half
+        processed_messages = set(list(processed_messages)[-500:])
+
 def run_in_bot_thread(coro):
     """Run coroutine in the dedicated bot thread with proper event loop"""
     future = asyncio.run_coroutine_threadsafe(coro, bot_loop)
@@ -53,6 +65,9 @@ def init_bot():
                 bot = Bot(token=TELEGRAM_BOT_TOKEN)
                 telegram_app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
                 
+                # Initialize the bot first
+                await bot.initialize()
+                
                 # Add handlers
                 telegram_app.add_handler(CommandHandler("start", start_command))
                 telegram_app.add_handler(CommandHandler("help", help_command))
@@ -61,7 +76,7 @@ def init_bot():
                     handle_message
                 ))
                 
-                # IMPORTANT: Initialize the application
+                # Initialize the application
                 await telegram_app.initialize()
                 
                 logger.info("✅ Bot initialized and ready for webhooks")
@@ -81,7 +96,7 @@ def init_bot():
     
     # Wait a moment for initialization
     import time
-    time.sleep(3)  # Give more time for proper initialization
+    time.sleep(3)
 
 @app.route('/')
 def health_check():
@@ -97,7 +112,8 @@ def health():
         "mode": "webhook",
         "bot_status": bot_status,
         "app_status": app_status,
-        "token_set": bool(TELEGRAM_BOT_TOKEN)
+        "token_set": bool(TELEGRAM_BOT_TOKEN),
+        "processed_messages_count": len(processed_messages)
     }, 200
 
 @app.route('/webhook', methods=['POST'])
@@ -113,8 +129,21 @@ def webhook():
         
         if not json_data:
             return "No data", 400
-            
-        logger.info(f"Received webhook data")
+        
+        # Check for message and get update_id for deduplication
+        update_id = json_data.get('update_id')
+        message = json_data.get('message')
+        
+        if update_id and update_id in processed_messages:
+            logger.info(f"Skipping duplicate update_id: {update_id}")
+            return "OK", 200
+        
+        # Add to processed messages
+        if update_id:
+            processed_messages.add(update_id)
+            clean_processed_messages()
+        
+        logger.info(f"Processing new webhook update_id: {update_id}")
         
         # Create Update object
         update = Update.de_json(json_data, bot)
@@ -127,6 +156,14 @@ def webhook():
     except Exception as e:
         logger.error(f"Webhook error: {e}", exc_info=True)
         return f"Error: {str(e)}", 500
+
+@app.route('/clear_cache')
+def clear_cache():
+    """Clear processed messages cache - useful for debugging"""
+    global processed_messages
+    count = len(processed_messages)
+    processed_messages.clear()
+    return {"cleared": count, "remaining": len(processed_messages)}, 200
 
 @app.route('/set_webhook')
 def set_webhook():
@@ -207,14 +244,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle all messages - GIFs, videos, and text"""
     try:
         message = update.message
-        logger.info(f"Processing message from user {message.from_user.id}")
+        message_id = message.message_id
+        user_id = message.from_user.id
+        
+        logger.info(f"Processing message {message_id} from user {user_id}")
         
         # Handle text messages
         if message.text:
             if message.text.startswith('/'):
                 return  # Let command handlers deal with commands
             await message.reply_text(f"✅ Webhook working! You said: {message.text}")
-            logger.info("Sent echo response")
+            logger.info(f"Sent echo response for message {message_id}")
             return
         
         # Handle media messages (GIFs, videos, etc.)
@@ -230,18 +270,21 @@ async def handle_gif(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle 'GIF' messages (actually MP4) and convert to real GIF"""
     try:
         message = update.message
-        logger.info(f"Starting GIF processing for user {message.from_user.id}")
+        message_id = message.message_id
+        user_id = message.from_user.id
+        
+        logger.info(f"Starting GIF processing for message {message_id} from user {user_id}")
         
         # Determine file type and get file object
         if message.animation:
             file_obj = message.animation
-            logger.info(f"Received animation: {file_obj.file_name}, size: {file_obj.file_size} bytes")
+            logger.info(f"Processing animation: {file_obj.file_name}, size: {file_obj.file_size} bytes")
         elif message.video:
             file_obj = message.video  
-            logger.info(f"Received video: size: {file_obj.file_size} bytes")
+            logger.info(f"Processing video: size: {file_obj.file_size} bytes")
         elif message.document and message.document.mime_type and "video" in message.document.mime_type:
             file_obj = message.document
-            logger.info(f"Received document: {file_obj.file_name}, type: {file_obj.mime_type}")
+            logger.info(f"Processing document: {file_obj.file_name}, type: {file_obj.mime_type}")
         else:
             await message.reply_text("❌ Please send a GIF, video, or animation to convert!")
             return
@@ -262,23 +305,23 @@ async def handle_gif(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
         # Download to temp file
         await file.download_to_drive(temp_input_path)
-        logger.info(f"Downloaded file to: {temp_input_path}")
+        logger.info(f"Downloaded file to: {temp_input_path} for message {message_id}")
         
         # Convert to GIF (this will ensure it's under 8MB)
-        logger.info("Converting MP4 to GIF...")
+        logger.info(f"Converting MP4 to GIF for message {message_id}...")
         gif_path = await convert_to_gif(temp_input_path)
         
         # Check final GIF size
         gif_size_mb = os.path.getsize(gif_path) / (1024 * 1024)
-        logger.info(f"GIF created: {gif_path}, size: {gif_size_mb:.2f}MB")
+        logger.info(f"GIF created: {gif_path}, size: {gif_size_mb:.2f}MB for message {message_id}")
         
         # Upload to Catbox
-        logger.info("Uploading to Catbox.moe...")
+        logger.info(f"Uploading to Catbox.moe for message {message_id}...")
         catbox_url = upload_to_catbox(gif_path)
         
         if catbox_url:
             await message.reply_text(f"✅ **GIF converted and uploaded!**\n\n🔗 {catbox_url}")
-            logger.info(f"Successfully uploaded to: {catbox_url}")
+            logger.info(f"Successfully uploaded to: {catbox_url} for message {message_id}")
         else:
             await message.reply_text("❌ Upload to Catbox failed. Please try again later.")
         
@@ -286,9 +329,9 @@ async def handle_gif(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             os.unlink(temp_input_path)
             os.unlink(gif_path)
-            logger.info("Cleaned up temporary files")
+            logger.info(f"Cleaned up temporary files for message {message_id}")
         except Exception as e:
-            logger.error(f"Cleanup error: {e}")
+            logger.error(f"Cleanup error for message {message_id}: {e}")
             
     except Exception as e:
         logger.error(f"Error processing GIF: {e}", exc_info=True)
