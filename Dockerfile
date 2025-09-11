@@ -14,4 +14,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 # Run bot
-CMD ["python3", "src/bot.py"]
+CMD ["python3", "src/debug_startup.py"]
